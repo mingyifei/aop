@@ -19,9 +19,12 @@ import static io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange.AUTO_
 import static io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange.DURABLE;
 import static io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange.INTERNAL;
 import static io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange.TYPE;
+import static io.streamnative.pulsar.handlers.amqp.utils.ExchangeUtil.getExchangeType;
+import static io.streamnative.pulsar.handlers.amqp.utils.ExchangeUtil.isBuildInExchange;
 
 import io.streamnative.pulsar.handlers.amqp.admin.AmqpAdmin;
 import io.streamnative.pulsar.handlers.amqp.common.exception.AoPException;
+import io.streamnative.pulsar.handlers.amqp.common.exception.AoPServiceRuntimeException;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange;
 import io.streamnative.pulsar.handlers.amqp.utils.ExchangeUtil;
 import java.util.Collections;
@@ -37,6 +40,7 @@ import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
+import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.qpid.server.protocol.ErrorCodes;
 
@@ -51,14 +55,17 @@ public class ExchangeContainer {
     private final ExecutorService routeExecutor;
     private final AmqpServiceConfiguration config;
     private final AmqpAdmin amqpAdmin;
+    private final PulsarClient pulsarClient;
 
     protected ExchangeContainer(AmqpTopicManager amqpTopicManager, PulsarService pulsarService,
-                                ExecutorService routeExecutor, AmqpServiceConfiguration config, AmqpAdmin amqpAdmin) {
+                                ExecutorService routeExecutor, AmqpServiceConfiguration config, AmqpAdmin amqpAdmin,
+                                PulsarClient pulsarClient) {
         this.amqpTopicManager = amqpTopicManager;
         this.pulsarService = pulsarService;
         this.routeExecutor = routeExecutor;
         this.config = config;
         this.amqpAdmin = amqpAdmin;
+        this.pulsarClient = pulsarClient;
     }
 
     @Getter
@@ -69,6 +76,10 @@ public class ExchangeContainer {
                                                             String exchangeName,
                                                             boolean createIfMissing,
                                                             String exchangeType) {
+        if (isBuildInExchange(exchangeName)) {
+            createIfMissing = true;
+            exchangeType = getExchangeType(exchangeName);
+        }
         return asyncGetExchange(namespaceName, exchangeName, createIfMissing, exchangeType, true, false, false, null);
     }
 
@@ -153,8 +164,10 @@ public class ExchangeContainer {
                 } else {
                     if (null == topic) {
                         log.warn("[{}][{}] The exchange topic did not exist.", namespaceName, exchangeName);
-                        amqpExchangeCompletableFuture.complete(null);
+                        amqpExchangeCompletableFuture.completeExceptionally(new AoPServiceRuntimeException.NoSuchExchangeException(
+                                "Exchange [" + exchangeName + "] not created"));
                         removeExchangeFuture(namespaceName, exchangeName);
+                        return;
                     } else {
                         // recover metadata if existed
                         PersistentTopic persistentTopic = (PersistentTopic) topic;
@@ -180,7 +193,8 @@ public class ExchangeContainer {
                             amqpExchange = new PersistentExchange(exchangeName, properties,
                                     AmqpExchange.Type.value(currentType), persistentTopic, currentDurable,
                                     currentAutoDelete, currentInternal, currentArguments, routeExecutor,
-                                    config.getAmqpExchangeRouteQueueSize(), config.isAmqpMultiBundleEnable(), amqpAdmin);
+                                    config.getAmqpExchangeRouteQueueSize(), config.isAmqpMultiBundleEnable(),
+                                    amqpAdmin, pulsarClient);
                         } catch (Exception e) {
                             log.error("Failed to init exchange {} in vhost {}.",
                                     exchangeName, namespaceName.getLocalName(), e);

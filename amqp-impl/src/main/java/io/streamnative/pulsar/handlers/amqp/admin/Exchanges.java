@@ -20,6 +20,7 @@ import io.streamnative.pulsar.handlers.amqp.admin.model.ExchangeDeleteParams;
 import io.streamnative.pulsar.handlers.amqp.admin.model.PublishParams;
 import io.streamnative.pulsar.handlers.amqp.admin.model.rabbitmq.ExchangesList;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange;
+import io.streamnative.pulsar.handlers.amqp.impl.PersistentQueue;
 import java.util.stream.Collectors;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -131,6 +132,24 @@ public class Exchanges extends ExchangeBase {
                         log.error("Failed to load exchange {} for tenant {} belong to vhost {}",
                                 exchange, tenant, vhost, t);
                     }
+                    resumeAsyncResponseExceptionally(response, t);
+                    return null;
+                });
+    }
+
+    @GET
+    @Path("/{vhost}/loadAllExchangeByVhost")
+    public void loadAllExchangeByVhost(@Suspended final AsyncResponse response, @PathParam("vhost") String vhost) {
+        getExchangeListAsync(tenant, vhost)
+                .thenAccept(exchanges -> {
+                    exchanges.forEach(topic -> {
+                        String s = TopicName.get(topic).getLocalName()
+                                .substring(PersistentExchange.TOPIC_PREFIX.length());
+                        amqpAdmin().loadExchange(getNamespaceName(vhost), s);
+                    });
+                })
+                .thenAccept(__ -> response.resume(Response.noContent().build()))
+                .exceptionally(t -> {
                     resumeAsyncResponseExceptionally(response, t);
                     return null;
                 });

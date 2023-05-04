@@ -122,24 +122,6 @@ public class Queues extends QueueBase {
     }
 
     @GET
-    @Path("/{vhost}/loadVhostAllQueue")
-    public void loadVhostAllQueue(@Suspended final AsyncResponse response,
-                               @PathParam("vhost") String vhost,
-                               @QueryParam("authoritative") @DefaultValue("false") boolean authoritative) {
-        getQueueListAsync(tenant, vhost)
-                .thenAccept(queues -> queues.forEach(topic -> {
-                    String s = TopicName.get(topic).getLocalName()
-                            .substring(PersistentQueue.TOPIC_PREFIX.length());
-                    amqpAdmin().loadQueue(getNamespaceName(vhost), s);
-                }))
-                .thenAccept(__ -> response.resume(Response.noContent().build()))
-                .exceptionally(t -> {
-                    resumeAsyncResponseExceptionally(response, t);
-                    return null;
-                });
-    }
-
-    @GET
     @Path("/{vhost}/{queue}/loadQueue")
     public void loadQueue(@Suspended final AsyncResponse response,
                           @PathParam("vhost") String vhost,
@@ -161,7 +143,7 @@ public class Queues extends QueueBase {
 
     @DELETE
     @Path("/{vhost}/{queue}/contents")
-    public void purgeQueue(@Suspended final AsyncResponse response,
+    public void queuePurge(@Suspended final AsyncResponse response,
                            @PathParam("vhost") String vhost,
                            @PathParam("queue") String queue,
                            PurgeQueueParams purgeQueueParams,

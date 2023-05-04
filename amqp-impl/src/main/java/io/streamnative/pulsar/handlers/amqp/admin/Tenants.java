@@ -29,11 +29,10 @@ public class Tenants extends BaseResources {
     }
 
     @GET
-    @Path("/loadAll")
-    public void loadAll(@Suspended final AsyncResponse response,
-                        @QueryParam("authoritative") @DefaultValue("false") boolean authoritative) {
+    @Path("/loadAllExchange")
+    public void loadAllExchange(@Suspended final AsyncResponse response) {
         getAllTenantListAsync()
-                .thenAccept(names -> names.forEach(name -> amqpAdmin().loadAllVhost(name.getName())))
+                .thenAccept(names -> names.forEach(name -> amqpAdmin().loadAllVhostForExchange(name.getName())))
                 .thenAccept(__ -> response.resume(Response.noContent().build()))
                 .exceptionally(t -> {
                     resumeAsyncResponseExceptionally(response, t);

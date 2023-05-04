@@ -13,15 +13,20 @@
  */
 package io.streamnative.pulsar.handlers.amqp;
 
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import io.streamnative.pulsar.handlers.amqp.common.exception.AoPServiceRuntimeException;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentQueue;
 import io.streamnative.pulsar.handlers.amqp.utils.MessageConvertUtils;
 import io.streamnative.pulsar.handlers.amqp.utils.QueueUtil;
 import io.streamnative.pulsar.handlers.amqp.utils.TopicUtil;
+import java.io.UnsupportedEncodingException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.Getter;
@@ -41,11 +46,14 @@ import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.impl.Backoff;
 import org.apache.pulsar.client.impl.BackoffBuilder;
 import org.apache.pulsar.client.impl.MessageIdImpl;
+import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.client.impl.TypedMessageBuilderImpl;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.qpid.server.protocol.v0_8.AMQShortString;
+import org.apache.qpid.server.protocol.v0_8.transport.BasicGetEmptyBody;
+import org.apache.qpid.server.protocol.v0_8.transport.MethodRegistry;
 
 /**
  * AMQP Pulsar consumer.
@@ -53,7 +61,9 @@ import org.apache.qpid.server.protocol.v0_8.AMQShortString;
 @Slf4j
 public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProcessor {
 
+    @Getter
     private final String consumerTag;
+    @Getter
     private final Consumer<byte[]> consumer;
     private final AmqpChannel amqpChannel;
     private final ScheduledExecutorService executorService;
@@ -63,6 +73,7 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
     private CompletableFuture<Producer<byte[]>> producer;
     private final PulsarAdmin pulsarAdmin;
     private String routingKey;
+    @Getter
     private String dleExchangeName;
     @Getter
     private final String queue;
@@ -108,12 +119,55 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
         executorService.submit(this::consume);
     }
 
+    public void consumeOne(boolean noAck){
+        MessageImpl<byte[]> message;
+        try {
+            message = (MessageImpl<byte[]>) this.consumer.receive(1, TimeUnit.SECONDS);
+        } catch (PulsarClientException e) {
+            log.error("Failed to receive message and send to client", e);
+            amqpChannel.close();
+            return;
+        }
+        if (message == null) {
+            MethodRegistry methodRegistry = amqpChannel.getConnection().getMethodRegistry();
+            BasicGetEmptyBody responseBody = methodRegistry.createBasicGetEmptyBody(null);
+            amqpChannel.getConnection().writeFrame(responseBody.generateFrame(amqpChannel.getChannelId()));
+            return;
+        }
+        MessageIdImpl messageId = (MessageIdImpl) message.getMessageId();
+        long deliveryIndex = this.amqpChannel.getNextDeliveryTag();
+        try {
+            this.amqpChannel.getConnection().getAmqpOutputConverter().writeGetOk(
+                    MessageConvertUtils.messageToAmqpBody(message),
+                    this.amqpChannel.getChannelId(),
+                    false,
+                    deliveryIndex, 0);
+        } catch (Exception e) {
+            log.error("Unknown exception", e);
+            amqpChannel.close();
+            return;
+        } finally {
+            message.release();
+        }
+        if (noAck) {
+            this.consumer.acknowledgeAsync(messageId).exceptionally(t -> {
+                log.error("Failed to ack message {} for topic {} by auto ack.",
+                        messageId, consumer.getTopic(), t);
+                return null;
+            });
+        } else {
+            this.amqpChannel.getUnacknowledgedMessageMap().add(
+                    deliveryIndex, PositionImpl.get(messageId.getLedgerId(), messageId.getEntryId()),
+                    AmqpPulsarConsumer.this, 0);
+        }
+    }
+
     private void consume() {
         if (isClosed) {
             return;
         }
 
-        Message<byte[]> message;
+        Message<byte[]> message = null;
         try {
             message = this.consumer.receive(0, TimeUnit.SECONDS);
             if (message == null) {
@@ -123,12 +177,16 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
 
             MessageIdImpl messageId = (MessageIdImpl) message.getMessageId();
             long deliveryIndex = this.amqpChannel.getNextDeliveryTag();
-            this.amqpChannel.getConnection().getAmqpOutputConverter().writeDeliver(
-                    MessageConvertUtils.messageToAmqpBody(message),
-                    this.amqpChannel.getChannelId(),
-                    false,
-                    deliveryIndex,
-                    AMQShortString.createAMQShortString(this.consumerTag));
+            try {
+                this.amqpChannel.getConnection().getAmqpOutputConverter().writeDeliver(
+                        MessageConvertUtils.messageToAmqpBody(message),
+                        this.amqpChannel.getChannelId(),
+                        false,
+                        deliveryIndex,
+                        AMQShortString.createAMQShortString(this.consumerTag));
+            } finally {
+                message.release();
+            }
             if (this.autoAck) {
                 this.consumer.acknowledgeAsync(messageId).exceptionally(t -> {
                     log.error("Failed to ack message {} for topic {} by auto ack.",
@@ -138,11 +196,14 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
             } else {
                 this.amqpChannel.getUnacknowledgedMessageMap().add(
                         deliveryIndex, PositionImpl.get(messageId.getLedgerId(), messageId.getEntryId()),
-                        AmqpPulsarConsumer.this, message.size());
+                        AmqpPulsarConsumer.this, 0);
             }
             consumeBackoff.reset();
             this.executorService.execute(this::consume);
         } catch (Exception e) {
+            if (message != null) {
+                ReferenceCountUtil.safeRelease(((MessageImpl<byte[]>) message).getDataBuffer());
+            }
             long backoff = consumeBackoff.next();
             log.error("Failed to receive message and send to client, retry in {} ms.", backoff, e);
             this.executorService.schedule(this::consume, backoff, TimeUnit.MILLISECONDS);
@@ -198,6 +259,9 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
         this.isClosed = true;
         this.consumer.pause();
         this.consumer.close();
+        if (producer != null) {
+            producer.thenApply(Producer::closeAsync);
+        }
     }
 
 }

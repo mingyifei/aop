@@ -123,7 +123,7 @@ public class AmqpServiceConfiguration extends ServiceConfiguration {
             required = false,
             doc = "Threads count for route exchange messages."
     )
-    private int amqpExchangeRouteExecutorThreads = Runtime.getRuntime().availableProcessors();
+    private int amqpExchangeRouteExecutorThreads = 2 * Runtime.getRuntime().availableProcessors();
 
     @FieldContext(
             category = CATEGORY_AMQP,
@@ -142,4 +142,10 @@ public class AmqpServiceConfiguration extends ServiceConfiguration {
             required = false
     )
     private String amqpPrometheusUrl;
+
+    @FieldContext(
+            category = CATEGORY_AMQP,
+            required = true
+    )
+    private String amqpElbAddress;
 }

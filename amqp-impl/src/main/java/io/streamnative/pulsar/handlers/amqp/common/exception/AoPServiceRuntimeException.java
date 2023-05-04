@@ -28,6 +28,11 @@ public class AoPServiceRuntimeException extends RuntimeException {
             super(e);
         }
     }
+    public static class ReaderCreationRuntimeException extends AoPServiceRuntimeException {
+        public ReaderCreationRuntimeException(Exception e) {
+            super(e);
+        }
+    }
 
     public static class ExchangeParameterException extends AoPServiceRuntimeException{
         public ExchangeParameterException(String message) {

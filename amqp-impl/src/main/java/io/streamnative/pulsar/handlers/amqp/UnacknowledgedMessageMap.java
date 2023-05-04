@@ -36,7 +36,7 @@ public class UnacknowledgedMessageMap {
     public interface MessageProcessor {
         void messageAck(Position position);
         void requeue(List<PositionImpl> positions);
-        default void discardMessage(List<PositionImpl> positions){};
+        default void discardMessage(List<PositionImpl> positions){}
     }
 
     /**

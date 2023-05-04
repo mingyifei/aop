@@ -14,6 +14,7 @@
 package io.streamnative.pulsar.handlers.amqp.utils;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.collect.Maps;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -62,7 +63,7 @@ public class HttpUtil {
             }
 
             @Override
-            public void onResponse(@NotNull Call call, @NotNull Response response) throws IOException {
+            public void onResponse(@NotNull Call call, @NotNull Response response) {
                 if (!response.isSuccessful()) {
                     future.completeExceptionally(new IOException("Unexpected code " + response));
                     return;
@@ -96,6 +97,35 @@ public class HttpUtil {
                 byte[] bytes = Objects.requireNonNull(response.body()).bytes();
                 T metricsResponse =
                         JsonUtil.parseObject(new String(bytes, StandardCharsets.UTF_8), classType);
+                future.complete(metricsResponse);
+            }
+        });
+        return future;
+    }
+
+    public static <T> CompletableFuture<T> getAsync(String url, Map<String, String> headers, TypeReference<T> tTypeReference) {
+        Request request = new Request.Builder()
+                .url(url)
+                .headers(Headers.of(headers))
+                .get()
+                .build();
+
+        CompletableFuture<T> future = new CompletableFuture<>();
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NotNull Call call, @NotNull IOException e) {
+                future.completeExceptionally(e);
+            }
+
+            @Override
+            public void onResponse(@NotNull Call call, @NotNull Response response) throws IOException {
+                if (!response.isSuccessful()) {
+                    future.completeExceptionally(new IOException("Unexpected code " + response));
+                    return;
+                }
+                byte[] bytes = Objects.requireNonNull(response.body()).bytes();
+                T metricsResponse =
+                        JsonUtil.parseObject(new String(bytes, StandardCharsets.UTF_8), tTypeReference);
                 future.complete(metricsResponse);
             }
         });

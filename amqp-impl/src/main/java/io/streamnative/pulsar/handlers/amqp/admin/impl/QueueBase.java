@@ -38,8 +38,10 @@ import io.streamnative.pulsar.handlers.amqp.impl.PersistentQueue;
 import io.streamnative.pulsar.handlers.amqp.utils.MessageConvertUtils;
 import io.streamnative.pulsar.handlers.amqp.utils.QueueUtil;
 import io.streamnative.pulsar.handlers.amqp.utils.TopicUtil;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -56,6 +58,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.time.DateUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pulsar.broker.service.Consumer;
 import org.apache.pulsar.broker.service.Subscription;
@@ -362,6 +365,10 @@ public class QueueBase extends BaseResources {
                 propsHeaders.put(k.substring(MessageConvertUtils.BASIC_PROP_HEADER_PRE.length()), v);
             }
         });
+        LocalDateTime localDateTime =
+                LocalDateTime.ofInstant(Instant.ofEpochMilli(message.getPublishTime()), ZoneId.systemDefault());
+        String format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").format(localDateTime);
+        props.put("publish-time", message.getPublishTime() + "（" + format + "）");
         messageBean.setProperties(props);
         return messageBean;
     }
@@ -380,7 +387,7 @@ public class QueueBase extends BaseResources {
                 .thenCompose(__ -> queueContainer().asyncGetQueue(getNamespaceName(vhost), queue, false)
                         .thenAccept(amqpQueue -> {
                             if (amqpQueue instanceof PersistentQueue persistentQueue) {
-                                persistentQueue.start();
+                                persistentQueue.startMessageExpireChecker();
                             }
                         }));
     }
@@ -389,12 +396,20 @@ public class QueueBase extends BaseResources {
         return queueContainer().asyncGetQueue(getNamespaceName(vhost), queue, false)
                 .thenAccept(amqpQueue -> {
                     if (amqpQueue instanceof PersistentQueue persistentQueue) {
-                        persistentQueue.start();
+                        persistentQueue.startMessageExpireChecker();
                     }
                 });
     }
 
     protected CompletableFuture<AmqpQueue> loadQueueAsync(String vhost, String queue) {
+        Map<String, CompletableFuture<AmqpQueue>> queueMap =
+                queueContainer().getQueueMap().get(getNamespaceName(vhost));
+        if (queueMap != null) {
+            CompletableFuture<AmqpQueue> future = queueMap.get(queue);
+            if (future != null) {
+                return future;
+            }
+        }
         return queueContainer().asyncGetQueue(getNamespaceName(vhost), queue, false);
     }
 

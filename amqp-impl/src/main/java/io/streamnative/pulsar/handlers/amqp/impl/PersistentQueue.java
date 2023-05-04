@@ -14,6 +14,8 @@
 package io.streamnative.pulsar.handlers.amqp.impl;
 
 import static io.streamnative.pulsar.handlers.amqp.utils.TopicUtil.getTopicName;
+import static org.apache.bookkeeper.mledger.impl.ManagedCursorImpl.FALSE;
+import static org.apache.bookkeeper.mledger.impl.ManagedCursorImpl.TRUE;
 import static org.apache.curator.shaded.com.google.common.base.Preconditions.checkArgument;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -31,9 +33,11 @@ import io.streamnative.pulsar.handlers.amqp.ExchangeContainer;
 import io.streamnative.pulsar.handlers.amqp.IndexMessage;
 import io.streamnative.pulsar.handlers.amqp.common.exception.AoPServiceRuntimeException;
 import io.streamnative.pulsar.handlers.amqp.utils.MessageConvertUtils;
+import io.streamnative.pulsar.handlers.amqp.utils.MessageNotificationUtil;
 import io.streamnative.pulsar.handlers.amqp.utils.PulsarTopicMetadataUtils;
 import io.streamnative.pulsar.handlers.amqp.utils.QueueUtil;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,12 +47,12 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
-import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.WaitingEntryCallBack;
@@ -56,8 +60,7 @@ import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.math.NumberUtils;
 import org.apache.pulsar.broker.PulsarServerException;
-import org.apache.pulsar.broker.protocol.ProtocolHandler;
-import org.apache.pulsar.broker.protocol.ProtocolHandlers;
+import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
@@ -68,6 +71,7 @@ import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
+import org.apache.pulsar.common.api.proto.CommandSubscribe;
 import org.apache.pulsar.common.api.proto.KeyValue;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.naming.NamespaceName;
@@ -75,6 +79,7 @@ import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.util.FutureUtil;
+import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.jetbrains.annotations.NotNull;
 
 /**
@@ -96,11 +101,12 @@ public class PersistentQueue extends AbstractAmqpQueue {
     public static final String X_DEAD_LETTER_ROUTING_KEY = "x-dead-letter-routing-key";
     public static final String DEFAULT_SUBSCRIPTION = "AMQP_DEFAULT";
     public static final long DELAY_1000 = 1000;
+    public static final long MAX_TTL = 50L * 24 * 60 * 60 * 1000;
 
     @Getter
-    private PersistentTopic indexTopic;
+    private final PersistentTopic indexTopic;
 
-    private ObjectMapper jsonMapper;
+    private final ObjectMapper jsonMapper;
 
     private AmqpEntryWriter amqpEntryWriter;
 
@@ -112,9 +118,15 @@ public class PersistentQueue extends AbstractAmqpQueue {
 
     private final ScheduledExecutorService scheduledExecutor;
 
-    @Getter
-    private volatile boolean isActive;
-    private volatile boolean isWaiting;
+    private volatile int isActive = FALSE;
+
+    private static final AtomicIntegerFieldUpdater<PersistentQueue> ACTIVE_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(PersistentQueue.class, "isActive");
+
+    private volatile int isWaiting = FALSE;
+
+    private static final AtomicIntegerFieldUpdater<PersistentQueue> WAITING_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(PersistentQueue.class, "isWaiting");
 
     public PersistentQueue(String queueName, PersistentTopic indexTopic,
                            long connectionId,
@@ -154,63 +166,44 @@ public class PersistentQueue extends AbstractAmqpQueue {
         }
     }
 
-    public CompletableFuture<Void> startMessageExpireChecker(int queueSize) {
-        return initDefaultSubscription(queueSize)
-                .thenRunAsync(() -> {
-                    initMessageExpire();
-                    this.defaultSubscription = indexTopic.getSubscriptions().get(DEFAULT_SUBSCRIPTION);
-                    // start check expired
-                    start();
-                    log.info("[{}] Message expiration checker started successfully", indexTopic.getName());
-                });
-    }
-
-    public synchronized void start() {
-        if (isActive) {
-            return;
+    public CompletableFuture<Void> startMessageExpireChecker() {
+        if (ACTIVE_UPDATER.compareAndSet(this, FALSE, TRUE)) {
+            return initDefaultSubscription()
+                    .thenAcceptAsync(subscription -> {
+                        initMessageExpire();
+                        this.defaultSubscription = (PersistentSubscription) subscription;
+                        // start check expired
+                        readEntries();
+                        log.info("[{}] Message expiration checker started successfully", indexTopic.getName());
+                    });
         }
-        this.isActive = true;
-        readEntries();
+        return CompletableFuture.completedFuture(null);
     }
 
-    public CompletableFuture<Void> initDefaultSubscription(int queueSize) {
-        try {
-            return indexTopic.getBrokerService().pulsar()
-                    .getClient()
-                    .newConsumer()
-                    .topic(indexTopic.getName())
-                    .subscriptionType(SubscriptionType.Shared)
-                    .subscriptionName(DEFAULT_SUBSCRIPTION)
-                    .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
-                    .consumerName(UUID.randomUUID().toString())
-                    .receiverQueueSize(queueSize)
-                    .negativeAckRedeliveryDelay(0, TimeUnit.MILLISECONDS)
-                    .subscribeAsync()
-                    .thenCompose(Consumer::closeAsync);
-        } catch (PulsarServerException e) {
-            throw new RuntimeException(e);
+    public CompletableFuture<Subscription> initDefaultSubscription() {
+        Subscription subscription = indexTopic.getSubscriptions().get(DEFAULT_SUBSCRIPTION);
+        if (subscription != null) {
+            return CompletableFuture.completedFuture(subscription);
         }
+        return indexTopic.createSubscription(DEFAULT_SUBSCRIPTION, CommandSubscribe.InitialPosition.Earliest, false,
+                Collections.emptyMap());
     }
 
-    static class WaitingCallBack implements WaitingEntryCallBack {
+    class WaitingCallBack implements WaitingEntryCallBack {
 
-        private final PersistentQueue persistentQueue;
-
-        public WaitingCallBack(PersistentQueue persistentQueue) {
-            this.persistentQueue = persistentQueue;
+        public WaitingCallBack() {
         }
 
         @Override
-        public synchronized void entriesAvailable() {
-            if (persistentQueue.isWaiting) {
-                persistentQueue.isWaiting = false;
-                persistentQueue.readEntries();
+        public void entriesAvailable() {
+            if (isActive == TRUE && WAITING_UPDATER.compareAndSet(PersistentQueue.this, TRUE, FALSE)) {
+                PersistentQueue.this.scheduledExecutor.execute(PersistentQueue.this::readEntries);
             }
         }
     }
 
-    public void readEntries() {
-        if (!isActive || isWaiting) {
+    private void readEntries() {
+        if (isActive == FALSE) {
             return;
         }
         // 1. If there are active consumers, stop monitoring
@@ -220,7 +213,7 @@ public class PersistentQueue extends AbstractAmqpQueue {
         if (defaultSubscription.getDispatcher() != null && defaultSubscription.getDispatcher()
                 .isConsumerConnected()) {
             log.warn("[{}] There are active consumers to stop monitoring", queueName);
-            isActive = false;
+            ACTIVE_UPDATER.set(this, FALSE);
             return;
         }
         ManagedCursor cursor = defaultSubscription.getCursor();
@@ -228,11 +221,13 @@ public class PersistentQueue extends AbstractAmqpQueue {
             if (cursor.getManagedLedger() instanceof ManagedLedgerImpl managedLedger) {
                 if (managedLedger.isTerminated()) {
                     log.warn("[{}]ledger is close", queueName);
+                    ACTIVE_UPDATER.set(this, FALSE);
                     return;
                 }
                 log.warn("[{}]start waiting read.", queueName);
-                isWaiting = true;
-                managedLedger.addWaitingEntryCallBack(new WaitingCallBack(this));
+                if (WAITING_UPDATER.compareAndSet(this, FALSE, TRUE)) {
+                    managedLedger.addWaitingEntryCallBack(new WaitingCallBack());
+                }
             } else {
                 scheduledExecutor.schedule(PersistentQueue.this::readEntries, 5 * DELAY_1000, TimeUnit.MILLISECONDS);
             }
@@ -271,13 +266,32 @@ public class PersistentQueue extends AbstractAmqpQueue {
                         // Stop check
                         // Sending a non-TTL message requires the presence of a consumer message. When a consumer
                         // exists, the current task will not be executed here.
-                        isActive = false;
+                        ACTIVE_UPDATER.set(PersistentQueue.this, FALSE);
                         log.warn("[{}] Queue message TTL is not set, stop check trace", queueName);
                         return;
                     }
                     long expireMillis;
                     // no expire
                     if ((expireMillis = entryExpired(expireTime, messageMetadata.getPublishTime())) > 0) {
+                        if (expireTime >= MAX_TTL) {
+                            log.warn("[{}]There is a message with a very long expiration time {}.",
+                                    defaultSubscription.getTopic().getName(), expireTime);
+                            try {
+                                indexTopic.getBrokerService()
+                                        .pulsar()
+                                        .getAdminClient()
+                                        .topics()
+                                        .setMessageTTL(defaultSubscription.getTopic().getName(),
+                                                (int) (expireTime / 1000 + 24 * 60 * 60));
+                            } catch (Exception e) {
+                                log.error("[{}] Failed to reset topic ttl:{}.",
+                                        defaultSubscription.getTopic().getName(), expireTime);
+                                MessageNotificationUtil.resetTtlFailed(defaultSubscription.getTopic().getName(),
+                                        expireTime, e);
+                            }
+                        }
+                        // The current topic may have been unloaded, isActive=false, when the task is awakened, filter
+                        // the task through the isActive check
                         scheduledExecutor.schedule(PersistentQueue.this::readEntries, expireMillis,
                                 TimeUnit.MILLISECONDS);
                         return;
@@ -313,11 +327,11 @@ public class PersistentQueue extends AbstractAmqpQueue {
                         }
                     }
                 });
+                final int readerIndex = dataBuffer.readerIndex();
+                dataBuffer.readerIndex(readerIndex);
                 deadLetterProducer.thenCompose(producer -> {
-                            MessageImpl<byte[]> message = MessageImpl.create(null, null,
-                                    messageMetadata,
-                                    dataBuffer,
-                                    Optional.empty(), null, Schema.BYTES,
+                            MessageImpl<byte[]> message = MessageImpl.create(null, null, messageMetadata,
+                                    dataBuffer, Optional.empty(), null, Schema.BYTES,
                                     0, false, -1L);
                             return ((ProducerImpl<byte[]>) producer).sendAsync(message);
                         })
@@ -499,9 +513,9 @@ public class PersistentQueue extends AbstractAmqpQueue {
 
     @Override
     public void close() {
-        this.isActive = false;
+        ACTIVE_UPDATER.set(this, FALSE);
         if (deadLetterProducer != null) {
-            deadLetterProducer.thenAcceptAsync(Producer::closeAsync);
+            deadLetterProducer.thenAccept(Producer::closeAsync);
         }
     }
 

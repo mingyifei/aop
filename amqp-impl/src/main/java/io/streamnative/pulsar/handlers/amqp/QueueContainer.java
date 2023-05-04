@@ -15,6 +15,7 @@
 package io.streamnative.pulsar.handlers.amqp;
 
 import io.streamnative.pulsar.handlers.amqp.common.exception.AoPException;
+import io.streamnative.pulsar.handlers.amqp.common.exception.AoPServiceRuntimeException;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentQueue;
 import io.streamnative.pulsar.handlers.amqp.utils.QueueUtil;
 import java.util.HashMap;
@@ -94,7 +95,9 @@ public class QueueContainer {
                 } else {
                     if (null == topic) {
                         log.warn("[{}][{}] Queue topic did not exist.", namespaceName, queueName);
-                        queueCompletableFuture.complete(null);
+                        queueCompletableFuture.completeExceptionally(
+                                new AoPServiceRuntimeException.NoSuchQueueException(
+                                        "Queue [" + queueName + "] not created"));
                         removeQueueFuture(namespaceName, queueName);
                     } else {
                         // recover metadata if existed
@@ -116,7 +119,7 @@ public class QueueContainer {
                                 return;
                             }
                         } else {
-                            amqpQueue.startMessageExpireChecker(config.getAmqpPulsarConsumerQueueSize())
+                            amqpQueue.startMessageExpireChecker()
                                     .whenComplete((__, t) -> {
                                         if (t != null) {
                                             log.error("Failed to start message expire checker queue [{}]", queueName, t);
@@ -197,7 +200,9 @@ public class QueueContainer {
             } else {
                 if (null == topic) {
                     log.warn("[{}][{}] Queue topic did not exist.", namespaceName, queueName);
-                    queueCompletableFuture.complete(null);
+                    queueCompletableFuture.completeExceptionally(
+                            new AoPServiceRuntimeException.NoSuchQueueException(
+                                    "Queue [" + queueName + "] not created"));
                     removeQueueFuture(namespaceName, queueName);
                 } else {
                     // recover metadata if existed
@@ -225,7 +230,7 @@ public class QueueContainer {
                             return;
                         }
                     } else {
-                        amqpQueue.startMessageExpireChecker(config.getAmqpPulsarConsumerQueueSize())
+                        amqpQueue.startMessageExpireChecker()
                                 .whenComplete((__, t) -> {
                                     if (t != null) {
                                         log.error("Failed to start message expire checker queue [{}]", queueName, t);

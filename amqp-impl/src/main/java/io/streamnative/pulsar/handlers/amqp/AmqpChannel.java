@@ -819,7 +819,7 @@ public class AmqpChannel implements ServerChannelMethodProcessor {
                 entry.getConsumer().messageAck(entry.getPosition());
             });
         } else {
-            closeChannel(ErrorCodes.IN_USE, "deliveryTag not found");
+            // closeChannel(ErrorCodes.IN_USE, "deliveryTag not found");
         }
         if (creditManager.hasCredit() && isBlockedOnCredit()) {
             unBlockedOnCredit();
@@ -917,7 +917,7 @@ public class AmqpChannel implements ServerChannelMethodProcessor {
         connection.closeChannelAndWriteFrame(this, cause, message);
     }
 
-    public long getNextDeliveryTag() {
+    public synchronized long getNextDeliveryTag() {
         return ++deliveryTag;
     }
 
@@ -1028,16 +1028,16 @@ public class AmqpChannel implements ServerChannelMethodProcessor {
 
     protected void handleAoPException(Throwable t) {
         Throwable cause = FutureUtil.unwrapCompletionException(t);
-        if (!(cause instanceof AoPException)) {
+        if (!(cause instanceof AoPException exception)) {
             connection.sendConnectionClose(INTERNAL_ERROR, t.getMessage(), channelId);
             return;
         }
-        AoPException exception = (AoPException) cause;
-        if (exception.isCloseChannel()) {
-            closeChannel(exception.getErrorCode(), exception.getMessage());
-        }
         if (exception.isCloseConnection()) {
             connection.sendConnectionClose(exception.getErrorCode(), exception.getMessage(), channelId);
+        } else if (exception.isCloseChannel()) {
+            closeChannel(exception.getErrorCode(), exception.getMessage());
+        } else {
+            connection.sendConnectionClose(INTERNAL_ERROR, exception.getMessage(), channelId);
         }
     }
 

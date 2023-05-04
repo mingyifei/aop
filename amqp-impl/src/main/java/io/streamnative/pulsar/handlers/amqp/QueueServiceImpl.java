@@ -359,7 +359,7 @@ public class QueueServiceImpl implements QueueService {
                         if (persistentTopic.getManagedLedger().getProperties().containsKey("BINDINGS")) {
                             List<PersistentExchange.Binding> amqpQueueProperties = JSON_MAPPER.readValue(
                                     persistentTopic.getManagedLedger().getProperties().get("BINDINGS"),
-                                    new TypeReference<>() {
+                                    new TypeReference<List<PersistentExchange.Binding>>() {
                                     });
                             bindings.addAll(amqpQueueProperties);
                         }
@@ -404,7 +404,7 @@ public class QueueServiceImpl implements QueueService {
                         if (persistentTopic.getManagedLedger().getProperties().containsKey("BINDINGS")) {
                             List<PersistentExchange.Binding> amqpQueueProperties = JSON_MAPPER.readValue(
                                     persistentTopic.getManagedLedger().getProperties().get("BINDINGS"),
-                                    new TypeReference<>() {
+                                    new TypeReference<List<PersistentExchange.Binding>>() {
                                     });
                             bindings.addAll(amqpQueueProperties);
                         }

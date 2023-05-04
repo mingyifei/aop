@@ -3,7 +3,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,10 +16,10 @@ package io.streamnative.pulsar.handlers.amqp.proxy;
 import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.streamnative.pulsar.handlers.amqp.AmqpBrokerDecoder;
@@ -29,6 +29,7 @@ import io.streamnative.pulsar.handlers.amqp.AopVersion;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.StringTokenizer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -91,6 +92,30 @@ public class ProxyConnection extends ChannelInboundHandlerAdapter implements
         RedirectToBroker,
         Closed
     }
+    private static final Map<String, String> USERS = new HashMap<>() {
+        {
+            // dc-chain
+            put("dc_chain/HsA2s3#s3", "pro-chain");
+            put("root/Ds4Y3#s1", "pro-chain");
+
+            // abm-dt
+            put("dc_user/Jsdxxs3#s3", "abm-dt");
+            put("root/RrdY3#s2", "abm-dt");
+
+            // pay
+            put("dc_pay/Laocksu3#s3", "pro-pay");
+            put("root/RrxY3#s2", "pro-pay");
+
+            // mall
+            put("dc_shop/Tc7aga3#s3", "pro-mall");
+            put("root/RroY3#s2", "pro-mall");
+
+            // base
+            put("dc_base/Niucksu6#s9", "pro-base");
+            put("dc_user/RidY3#s1", "pro-base");
+            put("root/Rs4Y3#s2", "pro-base");
+        }
+    };
 
     public ProxyConnection(ProxyService proxyService) throws PulsarClientException {
         log.info("ProxyConnection init ...");
@@ -194,11 +219,40 @@ public class ProxyConnection extends ChannelInboundHandlerAdapter implements
             log.debug("ProxyConnection - [receiveConnectionStartOk] clientProperties: {}, mechanism: {}, locale: {}",
                     clientProperties, mechanism, locale);
         }
+        if (mechanism != null && mechanism.length() != 0) {
+            if ("PLAIN".equals(String.valueOf(mechanism))) {
+                int authzidNullPosition = findNullPosition(response, 0);
+                if (authzidNullPosition >= 0) {
+                    int authcidNullPosition = findNullPosition(response, authzidNullPosition + 1);
+                    if (authcidNullPosition >= 0) {
+                        String username = new String(response, authzidNullPosition + 1,
+                                authcidNullPosition - authzidNullPosition - 1, UTF_8);
+                        int passwordLen = response.length - authcidNullPosition - 1;
+                        String password = new String(response, authcidNullPosition + 1, passwordLen, UTF_8);
+                        String tenant = USERS.get(username + "/" + password);
+                        if (tenant != null) {
+                            this.tenant = tenant;
+                        }
+                    }
+                }
+            }
+        }
         // TODO AUTH
         ConnectionTuneBody tuneBody =
                 methodRegistry.createConnectionTuneBody(proxyConfig.getAmqpMaxNoOfChannels(),
                         proxyConfig.getAmqpMaxFrameSize(), proxyConfig.getAmqpHeartBeat());
         writeFrame(tuneBody.generateFrame(0));
+    }
+
+    private int findNullPosition(byte[] response, int startPosition) {
+        int position = startPosition;
+        while (position < response.length) {
+            if (response[position] == (byte) 0) {
+                return position;
+            }
+            position++;
+        }
+        return -1;
     }
 
     // step 3
@@ -243,14 +297,14 @@ public class ProxyConnection extends ChannelInboundHandlerAdapter implements
         handleConnect(new AtomicInteger(5));
     }
 
-    private Pair<String, String> validateVirtualHost(String virtualHostStr){
+    private Pair<String, String> validateVirtualHost(String virtualHostStr) {
         String virtualHost = virtualHostStr.trim();
-        if("/".equals(virtualHost)){
-            return Pair.of(proxyConfig.getAmqpTenant(), AmqpConnection.DEFAULT_NAMESPACE);
+        if ("/".equals(virtualHost)) {
+            return Pair.of(this.tenant, AmqpConnection.DEFAULT_NAMESPACE);
         }
         StringTokenizer tokenizer = new StringTokenizer(virtualHost, "/", false);
         return switch (tokenizer.countTokens()) {
-            case 1 -> Pair.of(proxyConfig.getAmqpTenant(), tokenizer.nextToken());
+            case 1 -> Pair.of(this.tenant, tokenizer.nextToken());
             case 2 -> Pair.of(tokenizer.nextToken(), tokenizer.nextToken());
             default -> null;
         };
@@ -402,6 +456,8 @@ public class ProxyConnection extends ChannelInboundHandlerAdapter implements
             cnx.close();
         }
         state = State.Closed;
+        connectMsgList.forEach(ReferenceCountUtil::safeRelease);
+        connectMsgList.clear();
     }
 
 }

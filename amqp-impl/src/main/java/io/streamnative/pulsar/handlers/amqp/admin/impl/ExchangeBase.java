@@ -97,7 +97,7 @@ public class ExchangeBase extends BaseResources {
                 }).thenApply(__ -> exchangeList);
     }
 
-    private CompletableFuture<List<String>> getExchangeListAsync(String tenant, String ns) {
+    protected CompletableFuture<List<String>> getExchangeListAsync(String tenant, String ns) {
         return namespaceService()
                 .getFullListOfTopics(NamespaceName.get(tenant, ns))
                 .thenApply(list -> list.stream().filter(s ->
@@ -204,6 +204,14 @@ public class ExchangeBase extends BaseResources {
     }
 
     protected CompletableFuture<AmqpExchange> loadExchangeAsync(String vhost, String exchangeName) {
+        Map<String, CompletableFuture<AmqpExchange>> exMap =
+                exchangeContainer().getExchangeMap().get(getNamespaceName(vhost));
+        if (exMap != null) {
+            CompletableFuture<AmqpExchange> future = exMap.get(exchangeName);
+            if (future != null) {
+                return future;
+            }
+        }
         return exchangeContainer().asyncGetExchange(getNamespaceName(vhost), exchangeName, false, null);
     }
 

@@ -23,11 +23,13 @@ import io.streamnative.pulsar.handlers.amqp.IndexMessage;
 import io.streamnative.pulsar.handlers.amqp.admin.model.PublishParams;
 import io.streamnative.pulsar.handlers.amqp.common.exception.AoPServiceRuntimeException;
 import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +42,7 @@ import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TypedMessageBuilder;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.client.impl.TypedMessageBuilderImpl;
+import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.common.api.proto.KeyValue;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.compression.CompressionCodecProvider;
@@ -95,34 +98,37 @@ public final class MessageConvertUtils {
     // convert qpid IncomingMessage to Pulsar MessageImpl
     public static MessageImpl<byte[]> toPulsarMessage(IncomingMessage incomingMessage)
             throws UnsupportedEncodingException {
-        @SuppressWarnings("unchecked")
-        TypedMessageBuilderImpl<byte[]> builder = new TypedMessageBuilderImpl(null, Schema.BYTES);
-
+        MessageImpl<byte[]> message;
         // value
         if (incomingMessage.getBodyCount() > 0) {
-            ByteBuf byteBuf = Unpooled.buffer();
+            ByteBuf byteBuf = PulsarByteBufAllocator.DEFAULT.buffer((int)incomingMessage.getContentHeader().getBodySize());
             for (int i = 0; i < incomingMessage.getBodyCount(); i++) {
-                byteBuf.writeBytes(
-                        ((SingleQpidByteBuffer) incomingMessage.getContentChunk(i).getPayload())
-                                .getUnderlyingBuffer());
+                SingleQpidByteBuffer payload = (SingleQpidByteBuffer) incomingMessage.getContentChunk(i).getPayload();
+                byteBuf.writeBytes(payload.getUnderlyingBuffer());
+                payload.dispose();
             }
-            byte[] bytes = new byte[byteBuf.writerIndex()];
-            byteBuf.readBytes(bytes, 0, byteBuf.writerIndex());
-            builder.value(bytes);
+            message = MessageImpl.create(null, null, new MessageMetadata(), byteBuf,
+                    Optional.empty(), null, Schema.BYTES, 0, true, -1L);
+            byteBuf.release();
         } else {
-            builder.value(new byte[0]);
+            message = MessageImpl.create(null, null, new MessageMetadata(), Unpooled.EMPTY_BUFFER,
+                    Optional.empty(), null, Schema.BYTES, 0, false, -1L);
         }
-
+        MessageMetadata metadata = message.getMessageBuilder();
         // basic properties
         ContentHeaderBody contentHeaderBody = incomingMessage.getContentHeader();
         BasicContentHeaderProperties props = contentHeaderBody.getProperties();
-        setProp(builder, props);
-        setProp(builder, PROP_EXCHANGE, incomingMessage.getMessagePublishInfo().getExchange());
-        setProp(builder, PROP_IMMEDIATE, incomingMessage.getMessagePublishInfo().isImmediate());
-        setProp(builder, PROP_MANDATORY, incomingMessage.getMessagePublishInfo().isMandatory());
-        setProp(builder, PROP_ROUTING_KEY, incomingMessage.getMessagePublishInfo().getRoutingKey());
-
-        return (MessageImpl<byte[]>) builder.getMessage();
+        try {
+            setProp(metadata, props);
+            setProp(metadata, PROP_EXCHANGE, incomingMessage.getMessagePublishInfo().getExchange());
+            setProp(metadata, PROP_IMMEDIATE, incomingMessage.getMessagePublishInfo().isImmediate());
+            setProp(metadata, PROP_MANDATORY, incomingMessage.getMessagePublishInfo().isMandatory());
+            setProp(metadata, PROP_ROUTING_KEY, incomingMessage.getMessagePublishInfo().getRoutingKey());
+        } catch (UnsupportedEncodingException e) {
+            message.release();
+            throw e;
+        }
+        return message;
     }
 
     public static void setProp(TypedMessageBuilderImpl<byte[]> builder, BasicContentHeaderProperties props)
@@ -150,6 +156,35 @@ public final class MessageConvertUtils {
             Map<String, Object> headers = props.getHeadersAsMap();
             for (Map.Entry<String, Object> entry : headers.entrySet()) {
                 setProp(builder, BASIC_PROP_HEADER_PRE + entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    public static void setProp(MessageMetadata msgMetadata, BasicContentHeaderProperties props)
+            throws UnsupportedEncodingException {
+        if (props != null) {
+            if (props.getTimestamp() > 0) {
+                msgMetadata.setEventTime(props.getTimestamp());
+            }
+
+            setProp(msgMetadata, PROP_CONTENT_TYPE, props.getContentTypeAsString());
+            setProp(msgMetadata, PROP_ENCODING, props.getEncodingAsString());
+            setProp(msgMetadata, PROP_DELIVERY_MODE, ((Byte) props.getDeliveryMode()).intValue());
+            setProp(msgMetadata, PROP_PRIORITY_PRIORITY, ((Byte) props.getPriority()).intValue());
+            setProp(msgMetadata, PROP_CORRELATION_ID, props.getCorrelationIdAsString());
+            setProp(msgMetadata, PROP_REPLY_TO, props.getReplyToAsString());
+            setProp(msgMetadata, PROP_EXPIRATION, props.getExpiration());
+            setProp(msgMetadata, PROP_MESSAGE_ID, props.getMessageIdAsString());
+            setProp(msgMetadata, PROP_TIMESTAMP, props.getTimestamp());
+            setProp(msgMetadata, PROP_TYPE, props.getTypeAsString());
+            setProp(msgMetadata, PROP_USER_ID, props.getUserIdAsString());
+            setProp(msgMetadata, PROP_APP_ID, props.getAppIdAsString());
+            setProp(msgMetadata, PROP_CLUSTER_ID, props.getClusterIdAsString());
+            setProp(msgMetadata, PROP_PROPERTY_FLAGS, props.getPropertyFlags());
+
+            Map<String, Object> headers = props.getHeadersAsMap();
+            for (Map.Entry<String, Object> entry : headers.entrySet()) {
+                setProp(msgMetadata, BASIC_PROP_HEADER_PRE + entry.getKey(), entry.getValue());
             }
         }
     }
@@ -198,6 +233,17 @@ public final class MessageConvertUtils {
                 builder.property(propName, byteToString((byte) value));
             } else {
                 builder.property(propName, String.valueOf(value));
+            }
+        }
+    }
+
+    public static void setProp(MessageMetadata metadata, String propName, Object value)
+            throws UnsupportedEncodingException {
+        if (value != null) {
+            if (value instanceof Byte) {
+                metadata.addProperty().setKey(propName).setValue(byteToString((byte) value));
+            } else {
+                metadata.addProperty().setKey(propName).setValue(String.valueOf(value));
             }
         }
     }
@@ -467,12 +513,27 @@ public final class MessageConvertUtils {
                 getPropertiesFromMetadata(messageProperties);
 
         ContentHeaderBody contentHeaderBody = new ContentHeaderBody(metaData.getLeft());
-        contentHeaderBody.setBodySize(message.getData().length);
+        MessageImpl<byte[]> msg = (MessageImpl<byte[]>) message;
+        ByteBuf buf = msg.getDataBuffer();
+        msg.getData();
+        ByteBuffer byteBuffer;
+        if (buf.isDirect()) {
+            byteBuffer = ByteBuffer.allocateDirect(buf.readableBytes());
+            buf.getBytes(buf.readerIndex(), byteBuffer);
+        } else if (buf.arrayOffset() == 0 && buf.capacity() == buf.array().length) {
+            byte[] array = buf.array();
+            byteBuffer = ByteBuffer.wrap(array);
+        } else {
+            byteBuffer = ByteBuffer.allocateDirect(buf.readableBytes());
+            buf.getBytes(buf.readerIndex(), byteBuffer);
+        }
+        byteBuffer.flip();
+        contentHeaderBody.setBodySize(byteBuffer.limit());
 
         amqpMessage = AmqpMessageData.builder()
                 .messagePublishInfo(metaData.getRight())
                 .contentHeaderBody(contentHeaderBody)
-                .contentBody(new ContentBody(QpidByteBuffer.wrap(message.getData())))
+                .contentBody(new ContentBody(QpidByteBuffer.wrap(byteBuffer)))
                 .build();
         return amqpMessage;
     }

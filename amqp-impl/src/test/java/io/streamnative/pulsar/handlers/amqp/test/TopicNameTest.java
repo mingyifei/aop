@@ -52,7 +52,7 @@ public class TopicNameTest {
         try {
             new PersistentExchange(
                     exchangeName, null, exchangeType, exchangeTopic1, true, false, false, null,
-                    Executors.newSingleThreadExecutor(), 200, true, null);
+                    Executors.newSingleThreadExecutor(), 200, true, null, null);
         } catch (Exception e) {
             fail("Failed to new PersistentExchange. errorMsg: " + e.getMessage());
         }
@@ -63,7 +63,7 @@ public class TopicNameTest {
         try {
             new PersistentExchange(
                     exchangeName, null, exchangeType, exchangeTopic2, true, false, false, null,
-                    Executors.newSingleThreadExecutor(), 200, false, null);
+                    Executors.newSingleThreadExecutor(), 200, false, null, null);
         } catch (Exception e) {
             assertNotNull(e);
             log.info("This is expected behavior.");

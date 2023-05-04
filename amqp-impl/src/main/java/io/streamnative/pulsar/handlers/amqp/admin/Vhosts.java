@@ -55,11 +55,22 @@ public class Vhosts extends ExchangeBase {
     }
 
     @GET
-    @Path("/loadAllVhost")
-    public void loadAllVhost(@Suspended final AsyncResponse response,
-                             @QueryParam("authoritative") @DefaultValue("false") boolean authoritative) {
+    @Path("/loadAllVhostForExchange")
+    public void loadAllVhostForExchange(@Suspended final AsyncResponse response) {
         namespaceResource().listNamespacesAsync(tenant)
-                .thenAccept(names -> names.forEach(name -> amqpAdmin().loadVhostAllQueue(getNamespaceName(name))))
+                .thenAccept(names -> names.forEach(name -> amqpAdmin().loadAllExchangeByVhost(getNamespaceName(name))))
+                .thenAccept(__ -> response.resume(Response.noContent().build()))
+                .exceptionally(t -> {
+                    resumeAsyncResponseExceptionally(response, t);
+                    return null;
+                });
+    }
+
+    @GET
+    @Path("/unloadVhost")
+    public void unloadVhost(@Suspended final AsyncResponse response) {
+        namespaceResource().listNamespacesAsync(tenant)
+                .thenAccept(names -> names.forEach(name -> pulsarAdmin().namespaces().unloadAsync(tenant + "/" + name)))
                 .thenAccept(__ -> response.resume(Response.noContent().build()))
                 .exceptionally(t -> {
                     resumeAsyncResponseExceptionally(response, t);

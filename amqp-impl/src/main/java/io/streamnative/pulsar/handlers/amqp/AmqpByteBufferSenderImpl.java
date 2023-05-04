@@ -31,6 +31,6 @@ public class AmqpByteBufferSenderImpl extends AmqpByteBufferSender {
 
     @Override
     public void close() {
-
+        super.close();
     }
 }

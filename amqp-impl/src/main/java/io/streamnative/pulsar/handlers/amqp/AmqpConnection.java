@@ -28,6 +28,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.Objects;
 import java.util.StringTokenizer;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +49,7 @@ import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.util.collections.ConcurrentLongHashMap;
 import org.apache.qpid.server.bytebuffer.QpidByteBuffer;
+import org.apache.qpid.server.common.ServerPropertyNames;
 import org.apache.qpid.server.protocol.ErrorCodes;
 import org.apache.qpid.server.protocol.ProtocolVersion;
 import org.apache.qpid.server.protocol.v0_8.AMQDecoder;
@@ -174,7 +176,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        log.error("[{}] Got exception: {}", remoteAddress, cause.getMessage(), cause);
+        log.error("[{}] Got exception: {}", clientIp, cause.getMessage(), cause);
         close();
     }
 
@@ -183,6 +185,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         if (isActive.getAndSet(false)) {
             log.info("close netty channel {}", ctx.channel());
             ctx.close();
+            bufferSender.close();
         }
     }
 
@@ -193,14 +196,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
             log.debug("RECV ConnectionStartOk[clientProperties: {}, mechanism: {}, locale: {}]",
                     clientProperties, mechanism, locale);
         }
-        if (clientProperties != null) {
-            String clientIp = (String) clientProperties.get("client_ip");
-            if (clientIp != null) {
-                log.info("RECV Client Ip:{}", clientIp);
-                this.clientIp = clientIp.replace("/", "");
-                return;
-            }
-        }
+        this.clientIp = ctx.channel().remoteAddress().toString();
         assertState(ConnectionState.AWAIT_START_OK);
         // TODO clientProperties
 
@@ -349,15 +345,6 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         }
 
         NamespaceName namespaceName = NamespaceName.get(pair.getLeft(), pair.getRight());
-        /*if (AmqpConnection.DEFAULT_NAMESPACE.equals(pair.getRight())) {
-            // avoid the namespace public/default is not owned in standalone mode
-            TopicName topic = TopicName.get(TopicDomain.persistent.value(),
-                    namespaceName, "__lookup__");
-            LookupOptions lookupOptions = LookupOptions.builder().authoritative(true).build();
-            getPulsarService().getNamespaceService().getBrokerServiceUrlAsync(topic, lookupOptions);
-        }*/
-        // Policies policies = getPolicies(namespaceName);
-//        if (policies != null) {
         this.namespaceName = namespaceName;
 
         MethodRegistry methodRegistry = getMethodRegistry();
@@ -478,7 +465,11 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
             AMQMethodBody responseBody = this.methodRegistry.createConnectionStartBody(
                     (short) protocolVersion.getMajorVersion(),
                     (short) pv.getActualMinorVersion(),
-                    null,
+                    FieldTable.convertToFieldTable(new HashMap<>(2) {
+                        {
+                            put(ServerPropertyNames.VERSION, AopVersion.getVersion());
+                        }
+                    }),
                     // TODO temporary modification
                     "PLAIN token".getBytes(US_ASCII),
                     "en_US".getBytes(US_ASCII));
@@ -632,7 +623,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
                         AmqpConnection.this.remoteAddress.toString());
                     AmqpConnection.this.close();
                 } else if (event.state().equals(IdleState.WRITER_IDLE)) {
-                    log.warn("heartbeat write  idle [{}]", AmqpConnection.this.remoteAddress.toString());
+                    //log.warn("heartbeat write  idle [{}]", AmqpConnection.this.remoteAddress.toString());
                     writeFrame(HeartbeatBody.FRAME);
                 }
             }

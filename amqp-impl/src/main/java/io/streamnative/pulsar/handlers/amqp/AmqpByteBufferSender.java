@@ -16,6 +16,7 @@ package io.streamnative.pulsar.handlers.amqp;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.util.ReferenceCountUtil;
 import java.nio.ByteBuffer;
 import org.apache.qpid.server.bytebuffer.QpidByteBuffer;
 import org.apache.qpid.server.bytebuffer.SingleQpidByteBuffer;
@@ -56,6 +57,6 @@ public abstract class AmqpByteBufferSender implements ByteBufferSender {
 
     @Override
     public void close() {
-
+        ReferenceCountUtil.safeRelease(buf);
     }
 }
