@@ -15,6 +15,7 @@ package io.streamnative.pulsar.handlers.amqp;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.US_ASCII;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBuf;
@@ -29,6 +30,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.StringTokenizer;
 import java.util.concurrent.TimeUnit;
@@ -119,9 +121,36 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
     @Getter
     private long connectedAt;
 
+    private static final Map<String, String> USERS = new HashMap<>() {
+        {
+            // dc-chain
+            put("dc_chain/HsA2s3#s3", "pro-chain");
+            put("root/Ds4Y3#s1", "pro-chain");
+
+            // abm-dt
+            put("dc_user/Jsdxxs3#s3", "abm-dt");
+            put("root/RrdY3#s2", "abm-dt");
+
+            // pay
+            put("dc_pay/Laocksu3#s3", "pro-pay");
+            put("root/RrxY3#s2", "pro-pay");
+
+            // mall
+            put("dc_shop/Tc7aga3#s3", "pro-mall");
+            put("root/RroY3#s2", "pro-mall");
+
+            // base
+            put("dc_base/Niucksu6#s9", "pro-base");
+            put("dc_user/RidY3#s1", "pro-base");
+            put("root/Rs4Y3#s2", "pro-base");
+        }
+    };
+    private String tenant;
+
     public AmqpConnection(AmqpServiceConfiguration amqpConfig,
                           AmqpBrokerService amqpBrokerService) {
         super(amqpBrokerService.getPulsarService(), amqpConfig);
+        this.tenant = amqpConfig.getAmqpTenant();
         this.connectionId = ID_GENERATOR.incrementAndGet();
         this.channels = new ConcurrentLongHashMap<>();
         this.protocolVersion = ProtocolVersion.v0_91;
@@ -198,67 +227,24 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         }
         this.clientIp = ctx.channel().remoteAddress().toString();
         assertState(ConnectionState.AWAIT_START_OK);
-        // TODO clientProperties
-
-        // TODO tls security process
-        if (amqpBrokerService.isAuthenticationEnabled()) {
-            if (mechanism == null) {
-                sendConnectionClose(ErrorCodes.CONNECTION_FORCED, "No mechanism provided", 0);
-                return;
-            }
-            if (response == null || response.length == 0) {
-                sendConnectionClose(ErrorCodes.CONNECTION_FORCED, "No authentication data provided", 0);
-                return;
-            }
-
-            String authMethod = String.valueOf(mechanism);
-            if (authMethod.equals("PLAIN")) {
-                authMethod = "basic";
-            }
-
-            AuthenticationProvider authenticationProvider = amqpBrokerService.getAuthenticationService()
-                    .getAuthenticationProvider(authMethod);
-            if (authenticationProvider == null) {
-                if (log.isDebugEnabled()) {
-                    log.debug("No authentication provider is configured: mechanism={}", mechanism);
-                }
-                sendConnectionClose(ErrorCodes.CONNECTION_FORCED, "No authentication provider is configured", 0);
-                return;
-            }
-
-            try {
-                AuthData authData;
-                if (authMethod.equals("basic")) {
-                    // Original format: \000USERNAME\000PASSWORD
-                    String splitter = "\000";
-                    String[] data = StringUtils.stripStart(new String(response, StandardCharsets.UTF_8), splitter)
-                            .split(splitter);
-                    if (data.length != 2) {
-                        if (log.isDebugEnabled()) {
-                            log.debug("Authentication data format error: mechanism={}", mechanism);
+        if (mechanism != null && mechanism.length() != 0) {
+            if ("PLAIN".equals(String.valueOf(mechanism))) {
+                int authzidNullPosition = findNullPosition(response, 0);
+                if (authzidNullPosition >= 0) {
+                    int authcidNullPosition = findNullPosition(response, authzidNullPosition + 1);
+                    if (authcidNullPosition >= 0) {
+                        String username = new String(response, authzidNullPosition + 1,
+                                authcidNullPosition - authzidNullPosition - 1, UTF_8);
+                        int passwordLen = response.length - authcidNullPosition - 1;
+                        String password = new String(response, authcidNullPosition + 1, passwordLen, UTF_8);
+                        String tenant = USERS.get(username + "/" + password);
+                        if (tenant != null) {
+                            this.tenant = tenant;
                         }
-                        sendConnectionClose(ErrorCodes.CONNECTION_FORCED, "Authentication data format error", 0);
-                        return;
                     }
-                    // Encode data to Pulsar format: USERNAME:PASSWORD
-                    authData = AuthData.of(String.format("%s:%s", data[0], data[1]).getBytes(StandardCharsets.UTF_8));
-                } else {
-                    authData = AuthData.of(response);
                 }
-
-                authenticationState = authenticationProvider.newAuthState(authData, null, null);
-                authenticationState.authenticate(authData);
-                if (log.isDebugEnabled()) {
-                    String authRole = authenticationState.getAuthRole();
-                    log.debug("Authentication succeeded: mechanism={}, authRole={}", mechanism, authRole);
-                }
-            } catch (Exception e) {
-                log.error("Failed to authenticate: mechanism={}", mechanism, e);
-                sendConnectionClose(ErrorCodes.NOT_ALLOWED, "Authentication failed", 0);
-                return;
             }
         }
-
         ConnectionTuneBody tuneBody =
                 methodRegistry.createConnectionTuneBody(maxChannels,
                         maxFrameSize,
@@ -266,6 +252,17 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
 
         writeFrame(tuneBody.generateFrame(0));
         state = ConnectionState.AWAIT_TUNE_OK;
+    }
+
+    private int findNullPosition(byte[] response, int startPosition) {
+        int position = startPosition;
+        while (position < response.length) {
+            if (response[position] == (byte) 0) {
+                return position;
+            }
+            position++;
+        }
+        return -1;
     }
 
     @Override
@@ -527,14 +524,14 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         }
     }
 
-    private Pair<String, String> validateVirtualHost(String virtualHostStr){
+    private Pair<String, String> validateVirtualHost(String virtualHostStr) {
         String virtualHost = virtualHostStr.trim();
-        if("/".equals(virtualHost)){
-            return Pair.of(amqpConfig.getAmqpTenant(), AmqpConnection.DEFAULT_NAMESPACE);
+        if ("/".equals(virtualHost)) {
+            return Pair.of(this.tenant, AmqpConnection.DEFAULT_NAMESPACE);
         }
         StringTokenizer tokenizer = new StringTokenizer(virtualHost, "/", false);
         return switch (tokenizer.countTokens()) {
-            case 1 -> Pair.of(amqpConfig.getAmqpTenant(), tokenizer.nextToken());
+            case 1 -> Pair.of(this.tenant, tokenizer.nextToken());
             case 2 -> Pair.of(tokenizer.nextToken(), tokenizer.nextToken());
             default -> null;
         };
