@@ -43,7 +43,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -59,16 +58,12 @@ import org.apache.bookkeeper.mledger.WaitingEntryCallBack;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.math.NumberUtils;
-import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
-import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.Schema;
-import org.apache.pulsar.client.api.SubscriptionInitialPosition;
-import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.common.api.proto.CommandSubscribe;
@@ -79,7 +74,6 @@ import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.util.FutureUtil;
-import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.jetbrains.annotations.NotNull;
 
 /**
@@ -128,6 +122,11 @@ public class PersistentQueue extends AbstractAmqpQueue {
     private static final AtomicIntegerFieldUpdater<PersistentQueue> WAITING_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(PersistentQueue.class, "isWaiting");
 
+    private volatile int retry = 0;
+
+    private static final AtomicIntegerFieldUpdater<PersistentQueue> RETRY_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(PersistentQueue.class, "retry");
+
     public PersistentQueue(String queueName, PersistentTopic indexTopic,
                            long connectionId,
                            boolean exclusive, boolean autoDelete, Map<String, String> properties) {
@@ -139,7 +138,7 @@ public class PersistentQueue extends AbstractAmqpQueue {
         this.amqpEntryWriter = new AmqpEntryWriter(indexTopic);
     }
 
-    private void initMessageExpire() {
+    private CompletableFuture<Void> initMessageExpire() {
         String args = properties.get(ARGUMENTS);
         if (StringUtils.isNotBlank(args)) {
             arguments.putAll(QueueUtil.covertStringValueAsObjectMap(args));
@@ -158,23 +157,38 @@ public class PersistentQueue extends AbstractAmqpQueue {
                         namespaceName.getTenant(), namespaceName.getLocalName(), deadLetterExchange);
                 if (indexTopic.getBrokerService().getPulsar().getProtocolHandlers()
                         .protocol("amqp") instanceof AmqpProtocolHandler protocolHandler) {
-                    protocolHandler.getAmqpBrokerService().getAmqpAdmin()
-                            .loadExchange(namespaceName, deadLetterExchange);
+                    return protocolHandler.getAmqpBrokerService().getAmqpAdmin()
+                            .loadExchange(namespaceName, deadLetterExchange)
+                            .thenCompose(__ -> this.deadLetterProducer = initDeadLetterProducer(indexTopic, topic))
+                            .thenApply(__-> null);
                 }
-                this.deadLetterProducer = initDeadLetterProducer(indexTopic, topic);
             }
         }
+        return CompletableFuture.completedFuture(null);
     }
 
     public CompletableFuture<Void> startMessageExpireChecker() {
         if (ACTIVE_UPDATER.compareAndSet(this, FALSE, TRUE)) {
-            return initDefaultSubscription()
+            return initMessageExpire()
+                    .thenCompose(__-> initDefaultSubscription())
                     .thenAcceptAsync(subscription -> {
-                        initMessageExpire();
+                        RETRY_UPDATER.set(this, 0);
                         this.defaultSubscription = (PersistentSubscription) subscription;
                         // start check expired
                         readEntries();
                         log.info("[{}] Message expiration checker started successfully", indexTopic.getName());
+                    }).exceptionally(throwable -> {
+                        log.warn("Retry count:{} Queue {} DQL is not created, DQL: {} ,ex {}",
+                                retry, queueName, deadLetterExchange, throwable);
+                        if (RETRY_UPDATER.incrementAndGet(PersistentQueue.this) % 10 == 0) {
+                            MessageNotificationUtil.queueHasNoDQL(queueName, deadLetterExchange, throwable);
+                        }
+                        ACTIVE_UPDATER.compareAndSet(this, TRUE, FALSE);
+                        if (retry >= 50) {
+                            return null;
+                        }
+                        scheduledExecutor.schedule(this::startMessageExpireChecker, 10 * DELAY_1000, TimeUnit.MILLISECONDS);
+                        return null;
                     });
         }
         return CompletableFuture.completedFuture(null);

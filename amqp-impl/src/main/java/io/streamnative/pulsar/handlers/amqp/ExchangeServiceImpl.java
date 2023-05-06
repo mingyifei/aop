@@ -85,7 +85,8 @@ public class ExchangeServiceImpl implements ExchangeService {
                                 "Get empty exchange " + exchange + " in vhost " + namespaceName, true, false));
                         return;
                     }
-                    if (passive) {
+                    future.complete(ex);
+                    /*if (passive) {
                         future.complete(ex);
                         return;
                     }
@@ -113,7 +114,7 @@ public class ExchangeServiceImpl implements ExchangeService {
                         return;
                     }
 
-                    future.complete(ex);
+                    future.complete(ex);*/
                 });
         return future;
     }

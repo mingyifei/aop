@@ -198,8 +198,10 @@ public class ExchangeContainer {
                         } catch (Exception e) {
                             log.error("Failed to init exchange {} in vhost {}.",
                                     exchangeName, namespaceName.getLocalName(), e);
-                            amqpExchangeCompletableFuture.completeExceptionally(e);
-                            removeExchangeFuture(namespaceName, exchangeName);
+                            topic.deleteForcefully().thenRun(() -> {
+                                removeExchangeFuture(namespaceName, exchangeName);
+                                amqpExchangeCompletableFuture.completeExceptionally(e);
+                            });
                             return;
                         }
                         amqpExchangeCompletableFuture.complete(amqpExchange);

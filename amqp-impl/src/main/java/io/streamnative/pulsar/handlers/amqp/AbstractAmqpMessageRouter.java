@@ -17,6 +17,7 @@ import io.streamnative.pulsar.handlers.amqp.impl.DirectMessageRouter;
 import io.streamnative.pulsar.handlers.amqp.impl.FanoutMessageRouter;
 import io.streamnative.pulsar.handlers.amqp.impl.HeadersMessageRouter;
 import io.streamnative.pulsar.handlers.amqp.impl.TopicMessageRouter;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -34,7 +35,7 @@ public abstract class AbstractAmqpMessageRouter implements AmqpMessageRouter {
     protected AmqpQueue queue;
     protected final AmqpMessageRouter.Type routerType;
     protected Set<String> bindingKeys;
-    protected Map<String, Object> arguments;
+    protected Map<String, Object> arguments = new HashMap<>();
 
     protected AbstractAmqpMessageRouter(Type routerType) {
         this.routerType = routerType;

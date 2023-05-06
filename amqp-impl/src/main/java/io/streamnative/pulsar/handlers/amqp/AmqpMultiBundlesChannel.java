@@ -668,24 +668,22 @@ public class AmqpMultiBundlesChannel extends AmqpChannel {
                 .negativeAckRedeliveryDelay(0, TimeUnit.MILLISECONDS)
                 .subscribeAsync()
                 .thenAccept(consumer -> {
-                    AmqpPulsarConsumer amqpPulsarConsumer;
+                    AmqpPulsarConsumer amqpPulsarConsumer = new AmqpPulsarConsumer(queue, consumerTag, consumer, autoAck,
+                            AmqpMultiBundlesChannel.this,
+                            AmqpMultiBundlesChannel.this.connection.getPulsarService(), getAmqpAdmin());
                     try {
-                        amqpPulsarConsumer = new AmqpPulsarConsumer(queue, consumerTag, consumer, autoAck,
-                                AmqpMultiBundlesChannel.this,
-                                AmqpMultiBundlesChannel.this.connection.getPulsarService());
+                        amqpPulsarConsumer.initDLQ()
+                                .thenRun(() -> {
+                                    getAmqpAdmin().getQueueBindings(connection.getNamespaceName(), queue)
+                                            .thenAccept(queueBinds -> queueBinds.forEach(
+                                                    queueBind -> getAmqpAdmin().loadExchange(connection.getNamespaceName(),
+                                                            queueBind.getSource())));
+                                    consumerFuture.complete(amqpPulsarConsumer);
+                                    consumerList.add(amqpPulsarConsumer);
+                                });
                     } catch (PulsarServerException | PulsarAdminException e) {
                         throw new RuntimeException(e);
                     }
-                    if (amqpPulsarConsumer.getDleExchangeName() != null) {
-                        getAmqpAdmin().loadExchange(connection.getNamespaceName(),
-                                amqpPulsarConsumer.getDleExchangeName());
-                    }
-                    getAmqpAdmin().getQueueBindings(connection.getNamespaceName(), queue)
-                            .thenAccept(queueBinds -> queueBinds.forEach(
-                                    queueBind -> getAmqpAdmin().loadExchange(connection.getNamespaceName(),
-                                            queueBind.getSource())));
-                    consumerFuture.complete(amqpPulsarConsumer);
-                    consumerList.add(amqpPulsarConsumer);
                 })).exceptionally(throwable -> {
             consumerFuture.completeExceptionally(throwable);
             return null;

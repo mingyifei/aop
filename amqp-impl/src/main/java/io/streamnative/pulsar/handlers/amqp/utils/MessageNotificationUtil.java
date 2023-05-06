@@ -51,6 +51,17 @@ public class MessageNotificationUtil {
         HttpUtil.postAsync(WEB_HOOK, params);
     }
 
+    public static void queueHasNoDQL(String queue, String dql, Throwable throwable) {
+        Map<String, Object> params = new HashMap<>(4);
+        Map<String, String> content = new HashMap<>(2);
+        content.put("text",
+                String.format("Queue {%s} DQL is not created, DQL: {%s} exception %s",
+                        queue, dql, throwable));
+        params.put("msg_type", "text");
+        params.put("content", content);
+        HttpUtil.postAsync(WEB_HOOK, params);
+    }
+
 
     public static void main(String[] args) {
         resetTtlFailed("queue", 100000000, new RuntimeException("test ex"));

@@ -3,7 +3,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,19 +14,16 @@
 package io.streamnative.pulsar.handlers.amqp;
 
 import io.netty.util.ReferenceCountUtil;
-import io.netty.util.concurrent.DefaultThreadFactory;
-import io.streamnative.pulsar.handlers.amqp.common.exception.AoPServiceRuntimeException;
+import io.streamnative.pulsar.handlers.amqp.admin.AmqpAdmin;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentExchange;
 import io.streamnative.pulsar.handlers.amqp.impl.PersistentQueue;
 import io.streamnative.pulsar.handlers.amqp.utils.MessageConvertUtils;
 import io.streamnative.pulsar.handlers.amqp.utils.QueueUtil;
 import io.streamnative.pulsar.handlers.amqp.utils.TopicUtil;
-import java.io.UnsupportedEncodingException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.Getter;
@@ -71,22 +68,34 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
     private volatile boolean isClosed = false;
     private final Backoff consumeBackoff;
     private CompletableFuture<Producer<byte[]>> producer;
-    private final PulsarAdmin pulsarAdmin;
+    private PulsarAdmin pulsarAdmin;
     private String routingKey;
-    @Getter
     private String dleExchangeName;
     @Getter
     private final String queue;
 
-    public AmqpPulsarConsumer(String queue, String consumerTag, Consumer<byte[]> consumer, boolean autoAck, AmqpChannel amqpChannel,
-                              PulsarService pulsarService)
-            throws PulsarAdminException, PulsarServerException {
+    private final PulsarService pulsarService;
+    private final AmqpAdmin amqpAdmin;
+
+    public AmqpPulsarConsumer(String queue, String consumerTag, Consumer<byte[]> consumer, boolean autoAck,
+                              AmqpChannel amqpChannel,
+                              PulsarService pulsarService, AmqpAdmin amqpAdmin) {
         this.queue = queue;
         this.consumerTag = consumerTag;
         this.consumer = consumer;
         this.autoAck = autoAck;
         this.amqpChannel = amqpChannel;
+        this.pulsarService = pulsarService;
+        this.amqpAdmin = amqpAdmin;
         this.executorService = pulsarService.getExecutor();
+        this.consumeBackoff = new BackoffBuilder()
+                .setInitialTime(1, TimeUnit.MILLISECONDS)
+                .setMax(1, TimeUnit.SECONDS)
+                .setMandatoryStop(0, TimeUnit.SECONDS)
+                .create();
+    }
+
+    public CompletableFuture<Void> initDLQ() throws PulsarAdminException, PulsarServerException {
         this.pulsarAdmin = pulsarService.getAdminClient();
         Map<String, String> properties = pulsarAdmin.topics().getProperties(consumer.getTopic());
         String args = properties.get(PersistentQueue.ARGUMENTS);
@@ -102,24 +111,29 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
                 String topic = TopicUtil.getTopicName(PersistentExchange.TOPIC_PREFIX,
                         namespaceName.getTenant(), namespaceName.getLocalName(), dleName);
                 this.dleExchangeName = dleExchangeName.toString();
-                this.producer = pulsarService.getClient().newProducer()
-                        .topic(topic)
-                        .enableBatching(false)
-                        .createAsync();
+                return amqpAdmin.loadExchange(namespaceName, this.dleExchangeName)
+                        .thenCompose(__ -> {
+                            try {
+                                this.producer = pulsarService.getClient().newProducer()
+                                        .topic(topic)
+                                        .enableBatching(false)
+                                        .createAsync();
+                            } catch (PulsarServerException e) {
+                                throw new RuntimeException(e);
+                            }
+                            return producer;
+                        })
+                        .thenApply(__ -> null);
             }
         }
-        this.consumeBackoff = new BackoffBuilder()
-                .setInitialTime(1, TimeUnit.MILLISECONDS)
-                .setMax(1, TimeUnit.SECONDS)
-                .setMandatoryStop(0, TimeUnit.SECONDS)
-                .create();
+        return CompletableFuture.completedFuture(null);
     }
 
     public void startConsume() {
         executorService.submit(this::consume);
     }
 
-    public void consumeOne(boolean noAck){
+    public void consumeOne(boolean noAck) {
         MessageImpl<byte[]> message;
         try {
             message = (MessageImpl<byte[]>) this.consumer.receive(1, TimeUnit.SECONDS);
