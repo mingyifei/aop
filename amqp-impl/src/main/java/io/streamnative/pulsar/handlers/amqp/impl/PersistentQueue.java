@@ -149,9 +149,11 @@ public class PersistentQueue extends AbstractAmqpQueue {
             }
             this.deadLetterRoutingKey = (String) arguments.get(X_DEAD_LETTER_ROUTING_KEY);
 
-            if (StringUtils.isNotBlank(deadLetterExchange)
-                    && StringUtils.isNotBlank(deadLetterRoutingKey)) {
+            if (StringUtils.isNotBlank(deadLetterExchange)) {
                 // init producer
+                if (StringUtils.isBlank(deadLetterRoutingKey)) {
+                    this.deadLetterRoutingKey = "";
+                }
                 NamespaceName namespaceName = TopicName.get(indexTopic.getName()).getNamespaceObject();
                 String topic = getTopicName(PersistentExchange.TOPIC_PREFIX,
                         namespaceName.getTenant(), namespaceName.getLocalName(), deadLetterExchange);

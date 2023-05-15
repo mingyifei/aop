@@ -33,6 +33,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.StringTokenizer;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -45,6 +47,7 @@ import org.apache.pulsar.broker.authentication.AuthenticationProvider;
 import org.apache.pulsar.broker.authentication.AuthenticationState;
 import org.apache.pulsar.broker.namespace.LookupOptions;
 import org.apache.pulsar.broker.service.ServerCnx;
+import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.common.api.AuthData;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicDomain;
@@ -65,6 +68,7 @@ import org.apache.qpid.server.protocol.v0_8.transport.ConnectionCloseBody;
 import org.apache.qpid.server.protocol.v0_8.transport.ConnectionCloseOkBody;
 import org.apache.qpid.server.protocol.v0_8.transport.ConnectionTuneBody;
 import org.apache.qpid.server.protocol.v0_8.transport.HeartbeatBody;
+import org.apache.qpid.server.protocol.v0_8.transport.MessagePublishInfo;
 import org.apache.qpid.server.protocol.v0_8.transport.MethodRegistry;
 import org.apache.qpid.server.protocol.v0_8.transport.ProtocolInitiation;
 import org.apache.qpid.server.protocol.v0_8.transport.ServerChannelMethodProcessor;
@@ -121,6 +125,9 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
     @Getter
     private long connectedAt;
 
+    final Map<String, CompletableFuture<Producer<byte[]>>> producerMap;
+    final Map<String, MessagePublishInfo> publishInfoMap;
+
     private static final Map<String, String> USERS = new HashMap<>() {
         {
             // dc-chain
@@ -162,6 +169,8 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         this.heartBeat = amqpConfig.getAmqpHeartBeat();
         this.amqpOutputConverter = new AmqpOutputConverter(this);
         this.amqpBrokerService = amqpBrokerService;
+        this.producerMap = new ConcurrentHashMap<>();
+        this.publishInfoMap = new ConcurrentHashMap<>();
     }
 
 
@@ -179,6 +188,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         super.channelInactive(ctx);
         completeAndCloseAllChannels();
+        closeAllProducers();
         amqpBrokerService.getConnectionContainer().removeConnection(namespaceName, this);
         this.brokerDecoder.close();
     }
@@ -363,6 +373,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         try {
             if (orderlyClose.compareAndSet(false, true)) {
                 completeAndCloseAllChannels();
+                closeAllProducers();
             }
 
             MethodRegistry methodRegistry = getMethodRegistry();
@@ -393,6 +404,7 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
             try {
                 markChannelAwaitingCloseOk(channelId);
                 completeAndCloseAllChannels();
+                closeAllProducers();
             } finally {
                 writeFrame(frame);
             }
@@ -690,6 +702,13 @@ public class AmqpConnection extends AmqpCommandDecoder implements ServerMethodPr
         } finally {
             removeChannel(channelId);
         }
+    }
+
+    private void closeAllProducers() {
+        for (CompletableFuture<Producer<byte[]>> producer : producerMap.values()) {
+            producer.thenApply(Producer::closeAsync);
+        }
+        producerMap.clear();
     }
 
     private void closeAllChannels() {

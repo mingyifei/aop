@@ -70,17 +70,13 @@ import org.apache.qpid.server.protocol.v0_8.transport.QueueDeleteOkBody;
 @Log4j2
 public class AmqpMultiBundlesChannel extends AmqpChannel {
 
-    private final Map<String, CompletableFuture<Producer<byte[]>>> producerMap;
     private final List<AmqpPulsarConsumer> consumerList;
-
-    private final Map<String, MessagePublishInfo> publishInfoMap = new HashMap<>();
 
     private volatile String defQueue;
     private final PulsarClientImpl pulsarClient;
 
     public AmqpMultiBundlesChannel(int channelId, AmqpConnection connection, AmqpBrokerService amqpBrokerService) {
         super(channelId, connection, amqpBrokerService);
-        this.producerMap = new ConcurrentHashMap<>();
         this.consumerList = new ArrayList<>();
         this.pulsarClient = (PulsarClientImpl) this.connection.getAmqpBrokerService().getPulsarClient();
     }
@@ -297,13 +293,13 @@ public class AmqpMultiBundlesChannel extends AmqpChannel {
         }
         AMQShortString routingKeyLocal = routingKey == null ? AMQShortString.valueOf("") : routingKey;
         if (isDefaultExchange(exchange)) {
-            MessagePublishInfo messagePublishInfo = publishInfoMap.get(routingKeyLocal.toString());
+            MessagePublishInfo messagePublishInfo = connection.publishInfoMap.get(routingKeyLocal.toString());
             if (messagePublishInfo != null) {
                 setPublishFrame(messagePublishInfo, null);
                 return;
             }
-            synchronized (this) {
-                messagePublishInfo = publishInfoMap.get(routingKeyLocal.toString());
+            synchronized (connection) {
+                messagePublishInfo = connection.publishInfoMap.get(routingKeyLocal.toString());
                 if (messagePublishInfo != null) {
                     setPublishFrame(messagePublishInfo, null);
                     return;
@@ -326,8 +322,8 @@ public class AmqpMultiBundlesChannel extends AmqpChannel {
                             new MessagePublishInfo(
                                     AMQShortString.valueOf(AbstractAmqpExchange.DEFAULT_EXCHANGE_DURABLE),
                                     immediate, mandatory, routingKeyLocal);
-                    publishInfoMap.putIfAbsent(routingKeyLocal.toString(), info);
-                    setPublishFrame(publishInfoMap.get(routingKeyLocal.toString()), null);
+                    connection.publishInfoMap.putIfAbsent(routingKeyLocal.toString(), info);
+                    setPublishFrame(connection.publishInfoMap.get(routingKeyLocal.toString()), null);
                 }).exceptionally(t -> {
                     log.error("Failed to bind queue {} to exchange {}", routingKeyLocal,
                             AbstractAmqpExchange.DEFAULT_EXCHANGE_DURABLE, t);
@@ -602,7 +598,6 @@ public class AmqpMultiBundlesChannel extends AmqpChannel {
     @Override
     public void close() {
         closeAllConsumers();
-        closeAllProducers();
         // TODO need to delete exclusive queues in this channel.
         setDefQueue(null);
     }
@@ -631,19 +626,12 @@ public class AmqpMultiBundlesChannel extends AmqpChannel {
         }
     }
 
-    private void closeAllProducers() {
-        for (CompletableFuture<Producer<byte[]>> producer : producerMap.values()) {
-            producer.thenApply(Producer::closeAsync);
-        }
-        producerMap.clear();
-    }
-
     private AmqpAdmin getAmqpAdmin() {
         return this.connection.getAmqpBrokerService().getAmqpAdmin();
     }
 
     public CompletableFuture<Producer<byte[]>> getProducer(String exchange) {
-        return producerMap.computeIfAbsent(exchange,
+        return connection.producerMap.computeIfAbsent(exchange,
                 k -> getAmqpAdmin().loadExchange(connection.getNamespaceName(), exchange)
                         .thenCompose(__ -> pulsarClient.newProducer()
                                 .topic(getTopicName(PersistentExchange.TOPIC_PREFIX, exchange))

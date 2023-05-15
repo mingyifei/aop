@@ -105,8 +105,10 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
             String dleName;
             this.routingKey = (String) arguments.get("x-dead-letter-routing-key");
             if ((dleExchangeName = arguments.get(PersistentQueue.X_DEAD_LETTER_EXCHANGE)) != null
-                    && StringUtils.isNotBlank(dleName = dleExchangeName.toString())
-                    && StringUtils.isNotBlank(routingKey)) {
+                    && StringUtils.isNotBlank(dleName = dleExchangeName.toString())) {
+                if (StringUtils.isBlank(routingKey)) {
+                    this.routingKey = "";
+                }
                 NamespaceName namespaceName = TopicName.get(consumer.getTopic()).getNamespaceObject();
                 String topic = TopicUtil.getTopicName(PersistentExchange.TOPIC_PREFIX,
                         namespaceName.getTenant(), namespaceName.getLocalName(), dleName);
@@ -238,7 +240,7 @@ public class AmqpPulsarConsumer implements UnacknowledgedMessageMap.MessageProce
 
     @Override
     public void discardMessage(List<PositionImpl> positions) {
-        if (producer == null || routingKey == null) {
+        if (producer == null) {
             for (PositionImpl pos : positions) {
                 consumer.acknowledgeAsync(new MessageIdImpl(pos.getLedgerId(), pos.getEntryId(), -1));
             }

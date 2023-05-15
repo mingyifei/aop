@@ -59,8 +59,9 @@ public class AmqpBrokerService {
                     .serviceUrl(config.getAmqpElbAddress())
                     .ioThreads(config.getNumIOThreads())
                     .listenerThreads(config.getNumIOThreads())
-                    .memoryLimit(0,SizeUnit.BYTES)
+                    .memoryLimit(0, SizeUnit.BYTES)
                     .statsInterval(0, TimeUnit.MILLISECONDS)
+                    .connectionMaxIdleSeconds(-1)
                     .build();
         } catch (PulsarClientException e) {
             throw new AoPServiceRuntimeException(e);
